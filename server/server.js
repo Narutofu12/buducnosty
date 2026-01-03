@@ -6,6 +6,7 @@ let clients = [];
 
 wss.on("connection", ws => {
   clients.push(ws);
+  broadcastCount();
   console.log("Client connected, total:", clients.length);
 
   ws.on("message", message => {
@@ -21,8 +22,23 @@ wss.on("connection", ws => {
 
   ws.on("close", () => {
     clients = clients.filter(c => c !== ws);
+    broadcastCount();
     console.log("Client disconnected, total:", clients.length);
   });
 });
 
 console.log("Signaling server running on port", port);
+
+function broadcastCount() {
+  const msg = JSON.stringify({
+    type: "count",
+    count: clients.length
+  });
+
+  clients.forEach(c => {
+    if (c.readyState === WebSocket.OPEN) {
+      c.send(msg);
+    }
+  });
+}
+
