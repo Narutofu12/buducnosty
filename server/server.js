@@ -5,7 +5,6 @@ const wss = new WebSocket.Server({ port: 8080 });
 
 const sockets = new Map();   // uuid -> ws
 const profiles = new Map();  // uuid -> profile
-const messages = [];         // { from, to, text, time }
 
 function send(ws, data) {
   if (ws && ws.readyState === WebSocket.OPEN) {
@@ -13,13 +12,16 @@ function send(ws, data) {
   }
 }
 
+// Pošalji svim klijentima listu online korisnika
 function broadcastOnline() {
-  const list = Array.from(profiles.values()).map(p => ({
-    uuid: p.uuid,
-    name: p.name,
-    avatar: p.avatar,
-    online: p.online
-  }));
+  const list = Array.from(profiles.values())
+    .filter(p => p.online)
+    .map(p => ({
+      uuid: p.uuid,
+      name: p.name,
+      avatar: p.avatar || 'images/avatar.png',
+      online: p.online
+    }));
 
   sockets.forEach(ws => send(ws, {
     type: "onlineUsers",
@@ -34,82 +36,89 @@ wss.on("connection", ws => {
     let data;
     try { data = JSON.parse(raw); } catch { return; }
 
-    // 1️⃣ CREATE PROFILE
-    if (data.type === "createProfile") {
-      const uuid = randomUUID();
+    // --------------------------------
+    // 1️⃣ REGISTER / LOGIN
+    // --------------------------------
+    if (data.type === "register" || data.type === "login") {
+      let profile = profiles.get(data.profile.uuid);
 
-      const profile = {
-        uuid,
-        name: data.name,
-        avatar: data.avatar || null,
-        friends: [],
-        pending: [],
-        online: true
-      };
+      if (!profile) {
+        // kreiraj novi profil
+        profile = {
+          uuid: data.profile.uuid,
+          name: data.profile.name,
+          avatar: data.profile.image || 'images/avatar.png',
+          friends: [],
+          pending: [],
+          online: true
+        };
+        profiles.set(profile.uuid, profile);
+      } else {
+        profile.online = true;
+      }
 
-      profiles.set(uuid, profile);
-      sockets.set(uuid, ws);
-
-      send(ws, { type: "profileCreated", profile });
-      broadcastOnline();
-    }
-
-    // 2️⃣ LOGIN (POSTOJEĆI PROFIL)
-    if (data.type === "login") {
-      const profile = profiles.get(data.uuid);
-      if (!profile) return;
-
-      profile.online = true;
       sockets.set(profile.uuid, ws);
-
       send(ws, { type: "loginSuccess", profile });
       broadcastOnline();
     }
 
-    // 3️⃣ GET ALL USERS
-    if (data.type === "getUsers") {
-      send(ws, {
-        type: "onlineUsers",
-        users: Array.from(profiles.values())
-      });
-    }
-
-    // 4️⃣ FRIEND REQUEST
+    // --------------------------------
+    // 2️⃣ FRIEND REQUEST
+    // --------------------------------
     if (data.type === "friendRequest") {
-      const from = profiles.get(data.from);
+      const from = profiles.get(data.fromProfile.uuid);
       const to = profiles.get(data.to);
       if (!from || !to) return;
 
-      if (!to.pending.includes(from.uuid)) {
-        to.pending.push(from.uuid);
-      }
+      // dodaj u pending ako nije već tu
+      if (!to.pending.includes(from.uuid)) to.pending.push(from.uuid);
 
       send(sockets.get(to.uuid), {
         type: "friendRequest",
-        from: from.uuid,
-        name: from.name,
-        avatar: from.avatar
+        fromProfile: from
       });
     }
 
-    // 5️⃣ FRIEND ACCEPT
+    // --------------------------------
+    // 3️⃣ FRIEND ACCEPT
+    // --------------------------------
     if (data.type === "friendAccept") {
-      const from = profiles.get(data.from);
+      const from = profiles.get(data.fromProfile.uuid);
       const to = profiles.get(data.to);
       if (!from || !to) return;
 
-      from.friends.push(to.uuid);
-      to.friends.push(from.uuid);
+      // dodaj u friends ako već nije
+      if (!from.friends.includes(to.uuid)) from.friends.push(to.uuid);
+      if (!to.friends.includes(from.uuid)) to.friends.push(from.uuid);
 
+      // ukloni iz pending
       from.pending = from.pending.filter(u => u !== to.uuid);
       to.pending = to.pending.filter(u => u !== from.uuid);
 
-      send(sockets.get(from.uuid), { type: "friendAdded", user: to });
-      send(sockets.get(to.uuid), { type: "friendAdded", user: from });
+      send(sockets.get(from.uuid), { type: "friendAccept", fromProfile: to });
+      send(sockets.get(to.uuid), { type: "friendAccept", fromProfile: from });
     }
 
-    // 6️⃣ SEND MESSAGE
+    // --------------------------------
+    // 4️⃣ FRIEND REJECT
+    // --------------------------------
+    if (data.type === "friendReject") {
+      const from = profiles.get(data.fromProfile.uuid);
+      const to = profiles.get(data.to);
+      if (!from || !to) return;
+
+      to.pending = to.pending.filter(u => u !== from.uuid);
+
+      send(sockets.get(from.uuid), { type: "friendReject", fromProfile: to });
+    }
+
+    // --------------------------------
+    // 5️⃣ CHAT MESSAGE
+    // --------------------------------
     if (data.type === "sendMessage") {
+      const to = profiles.get(data.to);
+      if (!to) return;
+
       const msg = {
         from: data.from,
         to: data.to,
@@ -117,26 +126,16 @@ wss.on("connection", ws => {
         time: Date.now()
       };
 
-      messages.push(msg);
-
       send(sockets.get(data.to), {
         type: "message",
         message: msg
       });
     }
 
-    // 7️⃣ GET CHAT HISTORY
-    if (data.type === "getMessages") {
-      const chat = messages.filter(m =>
-        (m.from === data.me && m.to === data.with) ||
-        (m.from === data.with && m.to === data.me)
-      );
-
-      send(ws, { type: "messages", chat });
-    }
   });
 
   ws.on("close", () => {
+    // pronađi profil po ws i markiraj offline
     for (const [uuid, sock] of sockets.entries()) {
       if (sock === ws) {
         const profile = profiles.get(uuid);
