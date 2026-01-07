@@ -1,21 +1,32 @@
 const WebSocket = require("ws");
+const { randomUUID } = require("crypto");
+
 const wss = new WebSocket.Server({ port: 8080 });
 
-// ----------------------- MAPE -----------------------
-const users = new Map();           // ws -> profile
-const sockets = new Map();         // uuid -> ws
-const pendingRequests = new Map(); // uuid -> [ { fromProfile } ]
+const sockets = new Map();   // uuid -> ws
+const profiles = new Map();  // uuid -> profile
+const messages = [];         // { from, to, text, time }
 
-// ------------------- BROADCAST ONLINE USERS -------------------
-function broadcastOnlineUsers() {
-  const onlineList = Array.from(users.values());
-  const msg = JSON.stringify({ type: "roomUsersUpdate", users: onlineList });
-  users.forEach((_, ws) => {
-    if (ws.readyState === WebSocket.OPEN) ws.send(msg);
-  });
+function send(ws, data) {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify(data));
+  }
 }
 
-// ------------------- HANDLE NEW CONNECTION -------------------
+function broadcastOnline() {
+  const list = Array.from(profiles.values()).map(p => ({
+    uuid: p.uuid,
+    name: p.name,
+    avatar: p.avatar,
+    online: p.online
+  }));
+
+  sockets.forEach(ws => send(ws, {
+    type: "onlineUsers",
+    users: list
+  }));
+}
+
 wss.on("connection", ws => {
   console.log("Client connected");
 
@@ -23,81 +34,120 @@ wss.on("connection", ws => {
     let data;
     try { data = JSON.parse(raw); } catch { return; }
 
-    const { type } = data;
+    // 1️⃣ CREATE PROFILE
+    if (data.type === "createProfile") {
+      const uuid = randomUUID();
 
-    // ------------------- REGISTER USER -------------------
-    if (type === "register") {
-      const profile = data.profile;
-      users.set(ws, profile);
+      const profile = {
+        uuid,
+        name: data.name,
+        avatar: data.avatar || null,
+        friends: [],
+        pending: [],
+        online: true
+      };
+
+      profiles.set(uuid, profile);
+      sockets.set(uuid, ws);
+
+      send(ws, { type: "profileCreated", profile });
+      broadcastOnline();
+    }
+
+    // 2️⃣ LOGIN (POSTOJEĆI PROFIL)
+    if (data.type === "login") {
+      const profile = profiles.get(data.uuid);
+      if (!profile) return;
+
+      profile.online = true;
       sockets.set(profile.uuid, ws);
 
-      // Pošalji pending zahtjeve ako postoje
-      if (pendingRequests.has(profile.uuid)) {
-        const inbox = pendingRequests.get(profile.uuid);
-        ws.send(JSON.stringify({ type: "inbox", requests: inbox }));
-        pendingRequests.delete(profile.uuid);
-      }
-
-      broadcastOnlineUsers();
-      console.log("Registered:", profile.name);
-      return;
+      send(ws, { type: "loginSuccess", profile });
+      broadcastOnline();
     }
 
-    // ------------------- FRIEND REQUEST -------------------
-    if (type === "friendRequest") {
-      const targetWs = sockets.get(data.to);
-
-      if (targetWs && targetWs.readyState === WebSocket.OPEN) {
-        // odmah šalje ako je online
-        targetWs.send(JSON.stringify({ 
-          type: "friendRequest",
-          from: data.fromProfile.uuid,
-          fromName: data.fromProfile.name,
-          fromImage: data.fromProfile.image
-        }));
-      } else {
-        // ako nije online → spremi u pending
-        if (!pendingRequests.has(data.to)) pendingRequests.set(data.to, []);
-        pendingRequests.get(data.to).push({
-          fromProfile: data.fromProfile
-        });
-      }
-      return;
-    }
-
-    // ------------------- FRIEND ACCEPT / REJECT -------------------
-    if (type === "friendAccept" || type === "friendReject") {
-      const targetWs = sockets.get(data.to);
-      if (targetWs && targetWs.readyState === WebSocket.OPEN) {
-        targetWs.send(JSON.stringify({
-          type: type,
-          fromProfile: data.fromProfile
-        }));
-      }
-      return;
-    }
-
-    // ------------------- CHAT MESSAGE -------------------
-    if (type === "chat") {
-      // Broadcast svima
-      users.forEach((_, clientWs) => {
-        if (clientWs.readyState === WebSocket.OPEN) {
-          clientWs.send(JSON.stringify(data));
-        }
+    // 3️⃣ GET ALL USERS
+    if (data.type === "getUsers") {
+      send(ws, {
+        type: "onlineUsers",
+        users: Array.from(profiles.values())
       });
-      return;
     }
 
+    // 4️⃣ FRIEND REQUEST
+    if (data.type === "friendRequest") {
+      const from = profiles.get(data.from);
+      const to = profiles.get(data.to);
+      if (!from || !to) return;
+
+      if (!to.pending.includes(from.uuid)) {
+        to.pending.push(from.uuid);
+      }
+
+      send(sockets.get(to.uuid), {
+        type: "friendRequest",
+        from: from.uuid,
+        name: from.name,
+        avatar: from.avatar
+      });
+    }
+
+    // 5️⃣ FRIEND ACCEPT
+    if (data.type === "friendAccept") {
+      const from = profiles.get(data.from);
+      const to = profiles.get(data.to);
+      if (!from || !to) return;
+
+      from.friends.push(to.uuid);
+      to.friends.push(from.uuid);
+
+      from.pending = from.pending.filter(u => u !== to.uuid);
+      to.pending = to.pending.filter(u => u !== from.uuid);
+
+      send(sockets.get(from.uuid), { type: "friendAdded", user: to });
+      send(sockets.get(to.uuid), { type: "friendAdded", user: from });
+    }
+
+    // 6️⃣ SEND MESSAGE
+    if (data.type === "sendMessage") {
+      const msg = {
+        from: data.from,
+        to: data.to,
+        text: data.text,
+        time: Date.now()
+      };
+
+      messages.push(msg);
+
+      send(sockets.get(data.to), {
+        type: "message",
+        message: msg
+      });
+    }
+
+    // 7️⃣ GET CHAT HISTORY
+    if (data.type === "getMessages") {
+      const chat = messages.filter(m =>
+        (m.from === data.me && m.to === data.with) ||
+        (m.from === data.with && m.to === data.me)
+      );
+
+      send(ws, { type: "messages", chat });
+    }
   });
 
   ws.on("close", () => {
-    const profile = users.get(ws);
-    if (profile) {
-      users.delete(ws);
-      sockets.delete(profile.uuid);
-      console.log("Client disconnected:", profile.name);
-      broadcastOnlineUsers();
+    for (const [uuid, sock] of sockets.entries()) {
+      if (sock === ws) {
+        const profile = profiles.get(uuid);
+        if (profile) profile.online = false;
+        sockets.delete(uuid);
+        break;
+      }
     }
+    broadcastOnline();
+    console.log("Client disconnected");
   });
-
 });
+
+console.log("WS server running on :8080");
