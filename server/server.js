@@ -2,21 +2,20 @@ const WebSocket = require("ws");
 const wss = new WebSocket.Server({ port: 8080 });
 
 // ----------------------- MAPE -----------------------
-const users = new Map();    // ws -> profile
-const sockets = new Map();  // uuid -> ws
+const users = new Map();           // ws -> profile
+const sockets = new Map();         // uuid -> ws
 const pendingRequests = new Map(); // uuid -> [ { fromProfile } ]
 
-// ------------------- FUNKCIJA BROADCAST -------------------
+// ------------------- BROADCAST ONLINE USERS -------------------
 function broadcastOnlineUsers() {
   const onlineList = Array.from(users.values());
-  const msg = JSON.stringify({ type: "onlineUsers", users: onlineList });
-
+  const msg = JSON.stringify({ type: "roomUsersUpdate", users: onlineList });
   users.forEach((_, ws) => {
     if (ws.readyState === WebSocket.OPEN) ws.send(msg);
   });
 }
 
-// ------------------- NEW CONNECTION -------------------
+// ------------------- HANDLE NEW CONNECTION -------------------
 wss.on("connection", ws => {
   console.log("Client connected");
 
@@ -32,7 +31,7 @@ wss.on("connection", ws => {
       users.set(ws, profile);
       sockets.set(profile.uuid, ws);
 
-      // Ako postoje pending zahtjevi → pošalji ih u inbox
+      // Pošalji pending zahtjeve ako postoje
       if (pendingRequests.has(profile.uuid)) {
         const inbox = pendingRequests.get(profile.uuid);
         ws.send(JSON.stringify({ type: "inbox", requests: inbox }));
@@ -41,6 +40,7 @@ wss.on("connection", ws => {
 
       broadcastOnlineUsers();
       console.log("Registered:", profile.name);
+      return;
     }
 
     // ------------------- FRIEND REQUEST -------------------
@@ -49,23 +49,45 @@ wss.on("connection", ws => {
 
       if (targetWs && targetWs.readyState === WebSocket.OPEN) {
         // odmah šalje ako je online
-        targetWs.send(JSON.stringify({ ...data, type: "friendRequest" }));
+        targetWs.send(JSON.stringify({ 
+          type: "friendRequest",
+          from: data.fromProfile.uuid,
+          fromName: data.fromProfile.name,
+          fromImage: data.fromProfile.image
+        }));
       } else {
         // ako nije online → spremi u pending
         if (!pendingRequests.has(data.to)) pendingRequests.set(data.to, []);
         pendingRequests.get(data.to).push({
-          from: data.fromProfile
+          fromProfile: data.fromProfile
         });
       }
+      return;
     }
 
-    // ------------------- FRIEND ACCEPT -------------------
+    // ------------------- FRIEND ACCEPT / REJECT -------------------
     if (type === "friendAccept" || type === "friendReject") {
       const targetWs = sockets.get(data.to);
       if (targetWs && targetWs.readyState === WebSocket.OPEN) {
-        targetWs.send(JSON.stringify(data));
+        targetWs.send(JSON.stringify({
+          type: type,
+          fromProfile: data.fromProfile
+        }));
       }
+      return;
     }
+
+    // ------------------- CHAT MESSAGE -------------------
+    if (type === "chat") {
+      // Broadcast svima
+      users.forEach((_, clientWs) => {
+        if (clientWs.readyState === WebSocket.OPEN) {
+          clientWs.send(JSON.stringify(data));
+        }
+      });
+      return;
+    }
+
   });
 
   ws.on("close", () => {
@@ -77,4 +99,5 @@ wss.on("connection", ws => {
       broadcastOnlineUsers();
     }
   });
+
 });
