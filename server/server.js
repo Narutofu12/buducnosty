@@ -106,4 +106,38 @@ wss.on("connection", ws => {
     });
 });
 
+function broadcastLobby() {
+  const users = [];
+
+  for (let u of clients.values()) {
+    if (u.room === "lobby") {
+      users.push({
+        uuid: u.uuid,
+        name: u.name,
+        image: u.image
+      });
+    }
+  }
+
+  const msg = JSON.stringify({
+    type: "roomUsersUpdate",
+    users
+  });
+
+  for (let ws of clients.keys()) {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(msg);
+    }
+  }
+}
+
+function broadcastExcept(sender, msg) {
+  for (let ws of clients.keys()) {
+    if (ws !== sender && ws.readyState === WebSocket.OPEN) {
+      ws.send(msg);
+    }
+  }
+}
+
 console.log("Server running on port", port);
+
