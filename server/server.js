@@ -1,158 +1,121 @@
 const WebSocket = require("ws");
 const port = process.env.PORT || 8080;
 const wss = new WebSocket.Server({ port });
-const wss = new WebSocket.Server({ port: 8080 });
 
 const clients = new Map(); // ws -> user
-const rooms = { lobby: new Set() };
-// ----------------------- MAPE -----------------------
-const users = new Map();    // ws -> profile
-const sockets = new Map();  // uuid -> ws
-const pendingRequests = new Map(); // uuid -> [ { fromProfile } ]
+const users = new Map();   // ws -> profile
+const sockets = new Map(); // uuid -> ws
+const pendingRequests = new Map(); // uuid -> [ { type, fromProfile } ]
 
-// ------------------- FUNKCIJA BROADCAST -------------------
+// ------------------- BROADCAST ONLINE USERS -------------------
 function broadcastOnlineUsers() {
-  const onlineList = Array.from(users.values());
-  const msg = JSON.stringify({ type: "onlineUsers", users: onlineList });
-
-  users.forEach((_, ws) => {
-    if (ws.readyState === WebSocket.OPEN) ws.send(msg);
-  });
+    const onlineList = Array.from(users.values());
+    const msg = JSON.stringify({ type: "onlineUsers", users: onlineList });
+    users.forEach((_, ws) => {
+        if (ws.readyState === WebSocket.OPEN) ws.send(msg);
+    });
 }
 
-// ------------------- NEW CONNECTION -------------------
+// ------------------- CONNECTION -------------------
 wss.on("connection", ws => {
-console.log("Client connected");
+    console.log("Client connected");
 
-ws.on("message", raw => {
-let data;
-    try {
-      data = JSON.parse(raw);
-    } catch {
-      return;
-    }
-    try { data = JSON.parse(raw); } catch { return; }
+    ws.on("message", raw => {
+        let data;
+        try { data = JSON.parse(raw); } catch { return; }
 
-    // 🔹 JOIN LOBBY
-    if (data.type === "joinLobby") {
-      clients.set(ws, {
-        uuid: data.profile.uuid,
-        name: data.profile.name,
-        image: data.profile.image,
-        room: "lobby"
-      });
-    const { type } = data;
+        const type = data.type;
+        const profile = users.get(ws) || data.profile;
 
-      rooms.lobby.add(data.profile.uuid);
-      broadcastLobby();
-    }
-    // ------------------- REGISTER USER -------------------
-    if (type === "register") {
-      const profile = data.profile;
-      users.set(ws, profile);
-      sockets.set(profile.uuid, ws);
+        // ------------------- REGISTER -------------------
+        if (type === "register") {
+            users.set(ws, profile);
+            sockets.set(profile.uuid, ws);
 
-    // 🔹 FRIEND REQUEST
-    if (data.type === "friendRequest") {
-      const target = [...clients.entries()]
-        .find(([_, u]) => u.uuid === data.to);
+            // Pošalji sve pending zahtjeve ako ih ima
+            if (pendingRequests.has(profile.uuid)) {
+                const inbox = pendingRequests.get(profile.uuid);
+                inbox.forEach(req => {
+                    ws.send(JSON.stringify(req));
+                });
+                pendingRequests.delete(profile.uuid);
+            }
 
-      if (target) {
-        target[0].send(JSON.stringify(data));
-      // Ako postoje pending zahtjevi → pošalji ih u inbox
-      if (pendingRequests.has(profile.uuid)) {
-        const inbox = pendingRequests.get(profile.uuid);
-        ws.send(JSON.stringify({ type: "inbox", requests: inbox }));
-        pendingRequests.delete(profile.uuid);
-}
-    }
+            broadcastOnlineUsers();
+        }
 
-    // 🔹 FRIEND ACCEPT
-    if (data.type === "friendAccept") {
-      const target = [...clients.entries()]
-        .find(([_, u]) => u.uuid === data.to);
-      broadcastOnlineUsers();
-      console.log("Registered:", profile.name);
-    }
+        // ------------------- FRIEND REQUEST -------------------
+        if (type === "friendRequest") {
+            const targetWs = sockets.get(data.to);
 
-      if (target) {
-        target[0].send(JSON.stringify(data));
-    // ------------------- FRIEND REQUEST -------------------
-    if (type === "friendRequest") {
-      const targetWs = sockets.get(data.to);
+            // Provjeri da li već postoji u pending ili friends
+            const senderUuid = data.fromProfile.uuid;
+            const targetProfile = users.get(targetWs);
+            let alreadyFriend = false;
+            let alreadyPending = false;
 
-      if (targetWs && targetWs.readyState === WebSocket.OPEN) {
-        // odmah šalje ako je online
-        targetWs.send(JSON.stringify({ ...data, type: "friendRequest" }));
-      } else {
-        // ako nije online → spremi u pending
-        if (!pendingRequests.has(data.to)) pendingRequests.set(data.to, []);
-        pendingRequests.get(data.to).push({
-          from: data.fromProfile
-        });
-}
-}
+            if (targetProfile) {
+                alreadyFriend = targetProfile.friends?.some(f => f.uuid === senderUuid);
+                alreadyPending = targetProfile.pending?.some(f => f.uuid === senderUuid);
+            }
 
-    // 🔹 SIGNAL (offer/answer/ice)
-    if (data.offer || data.answer || data.ice) {
-      broadcastExcept(ws, raw);
-    // ------------------- FRIEND ACCEPT -------------------
-    if (type === "friendAccept" || type === "friendReject") {
-      const targetWs = sockets.get(data.to);
-      if (targetWs && targetWs.readyState === WebSocket.OPEN) {
-        targetWs.send(JSON.stringify(data));
-      }
-}
+            if (alreadyFriend || alreadyPending) return; // ignoriraj duplikat
+
+            // Ako je online → pošalji direktno
+            if (targetWs && targetWs.readyState === WebSocket.OPEN) {
+                targetWs.send(JSON.stringify({
+                    type: "friendRequest",
+                    fromProfile: data.fromProfile
+                }));
+            } else {
+                // ako nije online → spremi u pending
+                if (!pendingRequests.has(data.to)) pendingRequests.set(data.to, []);
+                pendingRequests.get(data.to).push({
+                    type: "friendRequest",
+                    fromProfile: data.fromProfile
+                });
+            }
+        }
+
+        // ------------------- FRIEND ACCEPT -------------------
+        if (type === "friendAccept" || type === "friendReject") {
+            const targetWs = sockets.get(data.to); // onaj koji je poslao zahtjev
+            const responder = data.fromProfile;    // osoba koja prihvaća ili odbija
+
+            // Pošalji alert pošiljaocu (onaj koji je inicirao zahtjev)
+            if (targetWs && targetWs.readyState === WebSocket.OPEN) {
+                targetWs.send(JSON.stringify({
+                    type: type,
+                    fromProfile: responder
+                }));
+            } else {
+                if (!pendingRequests.has(data.to)) pendingRequests.set(data.to, []);
+                pendingRequests.get(data.to).push({
+                    type: type,
+                    fromProfile: responder
+                });
+            }
+
+            // Pošalji alert onome koji je odgovorio
+            if (clients.has(ws) && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({
+                    type: type === "friendAccept" ? "friendAcceptedByYou" : "friendRejectedByYou",
+                    fromProfile: responder
+                }));
+            }
+        }
+    });
+
+    ws.on("close", () => {
+        const user = users.get(ws);
+        if (user) {
+            users.delete(ws);
+            sockets.delete(user.uuid);
+            clients.delete(ws);
+            broadcastOnlineUsers();
+        }
+        console.log("Client disconnected");
+    });
 });
-
-ws.on("close", () => {
-    const user = clients.get(ws);
-    if (user) {
-      rooms.lobby.delete(user.uuid);
-      clients.delete(ws);
-      broadcastLobby();
-    const profile = users.get(ws);
-    if (profile) {
-      users.delete(ws);
-      sockets.delete(profile.uuid);
-      console.log("Client disconnected:", profile.name);
-      broadcastOnlineUsers();
-}
-    console.log("Client disconnected");
-});
-});
-
-function broadcastLobby() {
-  const users = [];
-
-  for (let u of clients.values()) {
-    if (u.room === "lobby") {
-      users.push({
-        uuid: u.uuid,
-        name: u.name,
-        image: u.image
-      });
-    }
-  }
-
-  const msg = JSON.stringify({
-    type: "roomUsersUpdate",
-    users
-  });
-
-  for (let ws of clients.keys()) {
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(msg);
-    }
-  }
-}
-
-function broadcastExcept(sender, msg) {
-  for (let ws of clients.keys()) {
-    if (ws !== sender && ws.readyState === WebSocket.OPEN) {
-      ws.send(msg);
-    }
-  }
-}
 
 console.log("Server running on port", port);
