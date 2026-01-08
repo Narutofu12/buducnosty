@@ -2,12 +2,10 @@ const WebSocket = require("ws");
 const port = process.env.PORT || 8080;
 const wss = new WebSocket.Server({ port });
 
-const clients = new Map(); // ws -> user
-const users = new Map();   // ws -> profile
+const users = new Map(); // ws -> profile
 const sockets = new Map(); // uuid -> ws
 const pendingRequests = new Map(); // uuid -> [ { type, fromProfile } ]
 
-// ------------------- BROADCAST ONLINE USERS -------------------
 function broadcastOnlineUsers() {
     const onlineList = Array.from(users.values());
     const msg = JSON.stringify({ type: "onlineUsers", users: onlineList });
@@ -16,7 +14,6 @@ function broadcastOnlineUsers() {
     });
 }
 
-// ------------------- CONNECTION -------------------
 wss.on("connection", ws => {
     console.log("Client connected");
 
@@ -27,15 +24,14 @@ wss.on("connection", ws => {
         const type = data.type;
         const profile = users.get(ws) || data.profile;
 
-        // ------------------- REGISTER -------------------
+        // REGISTER
         if (type === "register") {
             users.set(ws, profile);
             sockets.set(profile.uuid, ws);
 
-            // Pošalji sve pending zahtjeve ako ih ima
+            // Pošalji sve pending zahtjeve
             if (pendingRequests.has(profile.uuid)) {
-                const inbox = pendingRequests.get(profile.uuid);
-                inbox.forEach(req => {
+                pendingRequests.get(profile.uuid).forEach(req => {
                     ws.send(JSON.stringify(req));
                 });
                 pendingRequests.delete(profile.uuid);
@@ -44,45 +40,37 @@ wss.on("connection", ws => {
             broadcastOnlineUsers();
         }
 
-        // ------------------- FRIEND REQUEST -------------------
+        // FRIEND REQUEST
         if (type === "friendRequest") {
             const targetWs = sockets.get(data.to);
-
-            // Provjeri da li već postoji u pending ili friends
             const senderUuid = data.fromProfile.uuid;
-            const targetProfile = users.get(targetWs);
+
+            // Spriječi duplikat u pending ili friends
             let alreadyFriend = false;
             let alreadyPending = false;
-
-            if (targetProfile) {
+            if (targetWs && users.has(targetWs)) {
+                const targetProfile = users.get(targetWs);
                 alreadyFriend = targetProfile.friends?.some(f => f.uuid === senderUuid);
-                alreadyPending = targetProfile.pending?.some(f => f.uuid === senderUuid);
+                alreadyPending = pendingRequests.get(targetProfile.uuid)?.some(f => f.fromProfile.uuid === senderUuid);
             }
 
-            if (alreadyFriend || alreadyPending) return; // ignoriraj duplikat
+            if (alreadyFriend || alreadyPending) return;
 
-            // Ako je online → pošalji direktno
+            const payload = { type: "friendRequest", fromProfile: data.fromProfile };
             if (targetWs && targetWs.readyState === WebSocket.OPEN) {
-                targetWs.send(JSON.stringify({
-                    type: "friendRequest",
-                    fromProfile: data.fromProfile
-                }));
+                targetWs.send(JSON.stringify(payload));
             } else {
-                // ako nije online → spremi u pending
                 if (!pendingRequests.has(data.to)) pendingRequests.set(data.to, []);
-                pendingRequests.get(data.to).push({
-                    type: "friendRequest",
-                    fromProfile: data.fromProfile
-                });
+                pendingRequests.get(data.to).push(payload);
             }
         }
 
-        // ------------------- FRIEND ACCEPT -------------------
+        // FRIEND ACCEPT / REJECT
         if (type === "friendAccept" || type === "friendReject") {
-            const targetWs = sockets.get(data.to); // onaj koji je poslao zahtjev
-            const responder = data.fromProfile;    // osoba koja prihvaća ili odbija
+            const targetWs = sockets.get(data.to); // originalni posiljalac
+            const responder = data.fromProfile;    // osoba koja odgovara
 
-            // Pošalji alert pošiljaocu (onaj koji je inicirao zahtjev)
+            // Posalji pošiljaocu
             if (targetWs && targetWs.readyState === WebSocket.OPEN) {
                 targetWs.send(JSON.stringify({
                     type: type,
@@ -96,22 +84,22 @@ wss.on("connection", ws => {
                 });
             }
 
-            // Pošalji alert onome koji je odgovorio
-            if (clients.has(ws) && ws.readyState === WebSocket.OPEN) {
+            // Posalji onome ko odgovara
+            if (ws.readyState === WebSocket.OPEN) {
                 ws.send(JSON.stringify({
                     type: type === "friendAccept" ? "friendAcceptedByYou" : "friendRejectedByYou",
-                    fromProfile: responder
+                    fromProfile: responder,
+                    toProfile: data.toProfile // dodano za alert
                 }));
             }
         }
     });
 
     ws.on("close", () => {
-        const user = users.get(ws);
-        if (user) {
+        const profile = users.get(ws);
+        if (profile) {
             users.delete(ws);
-            sockets.delete(user.uuid);
-            clients.delete(ws);
+            sockets.delete(profile.uuid);
             broadcastOnlineUsers();
         }
         console.log("Client disconnected");
