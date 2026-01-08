@@ -1,109 +1,124 @@
 const WebSocket = require("ws");
 const port = process.env.PORT || 8080;
-const wss = new WebSocket.Server({ port });
+const wss = new WebSocket.Server({ port: 8080 });
 
-const users = new Map(); // ws -> profile
-const sockets = new Map(); // uuid -> ws
-const pendingRequests = new Map(); // uuid -> [ { type, fromProfile } ]
+const clients = new Map(); // ws -> user
+const rooms = { lobby: new Set() };
+// ----------------------- MAPE -----------------------
+const users = new Map();    // ws -> profile
+const sockets = new Map();  // uuid -> ws
+const pendingRequests = new Map(); // uuid -> [ { fromProfile } ]
 
+// ------------------- FUNKCIJA BROADCAST -------------------
 function broadcastOnlineUsers() {
-    const onlineList = Array.from(users.values());
-    const msg = JSON.stringify({ type: "onlineUsers", users: onlineList });
-    users.forEach((_, ws) => {
-        if (ws.readyState === WebSocket.OPEN) ws.send(msg);
-    });
+  const onlineList = Array.from(users.values());
+  const msg = JSON.stringify({ type: "onlineUsers", users: onlineList });
+
+  users.forEach((_, ws) => {
+    if (ws.readyState === WebSocket.OPEN) ws.send(msg);
+  });
 }
 
+// ------------------- NEW CONNECTION -------------------
 wss.on("connection", ws => {
-    console.log("Client connected");
+console.log("Client connected");
 
-    ws.on("message", raw => {
-        let data;
-        try { data = JSON.parse(raw); } catch { return; }
+ws.on("message", raw => {
+let data;
+    try {
+      data = JSON.parse(raw);
+    } catch {
+      return;
+    }
+    try { data = JSON.parse(raw); } catch { return; }
 
-        const type = data.type;
-        const profile = users.get(ws) || data.profile;
+    // 🔹 JOIN LOBBY
+    if (data.type === "joinLobby") {
+      clients.set(ws, {
+        uuid: data.profile.uuid,
+        name: data.profile.name,
+        image: data.profile.image,
+        room: "lobby"
+      });
+    const { type } = data;
 
-        // REGISTER
-        if (type === "register") {
-            users.set(ws, profile);
-            sockets.set(profile.uuid, ws);
+      rooms.lobby.add(data.profile.uuid);
+      broadcastLobby();
+    }
+    // ------------------- REGISTER USER -------------------
+    if (type === "register") {
+      const profile = data.profile;
+      users.set(ws, profile);
+      sockets.set(profile.uuid, ws);
 
-            // Pošalji sve pending zahtjeve
-            if (pendingRequests.has(profile.uuid)) {
-                pendingRequests.get(profile.uuid).forEach(req => {
-                    ws.send(JSON.stringify(req));
-                });
-                pendingRequests.delete(profile.uuid);
-            }
+    // 🔹 FRIEND REQUEST
+    if (data.type === "friendRequest") {
+      const target = [...clients.entries()]
+        .find(([_, u]) => u.uuid === data.to);
 
-            broadcastOnlineUsers();
-        }
+      if (target) {
+        target[0].send(JSON.stringify(data));
+      // Ako postoje pending zahtjevi → pošalji ih u inbox
+      if (pendingRequests.has(profile.uuid)) {
+        const inbox = pendingRequests.get(profile.uuid);
+        ws.send(JSON.stringify({ type: "inbox", requests: inbox }));
+        pendingRequests.delete(profile.uuid);
+}
+    }
 
-        // FRIEND REQUEST
-        if (type === "friendRequest") {
-            const targetWs = sockets.get(data.to);
-            const senderUuid = data.fromProfile.uuid;
+    // 🔹 FRIEND ACCEPT
+    if (data.type === "friendAccept") {
+      const target = [...clients.entries()]
+        .find(([_, u]) => u.uuid === data.to);
+      broadcastOnlineUsers();
+      console.log("Registered:", profile.name);
+    }
 
-            // Spriječi duplikat u pending ili friends
-            let alreadyFriend = false;
-            let alreadyPending = false;
-            if (targetWs && users.has(targetWs)) {
-                const targetProfile = users.get(targetWs);
-                alreadyFriend = targetProfile.friends?.some(f => f.uuid === senderUuid);
-                alreadyPending = pendingRequests.get(targetProfile.uuid)?.some(f => f.fromProfile.uuid === senderUuid);
-            }
+      if (target) {
+        target[0].send(JSON.stringify(data));
+    // ------------------- FRIEND REQUEST -------------------
+    if (type === "friendRequest") {
+      const targetWs = sockets.get(data.to);
 
-            if (alreadyFriend || alreadyPending) return;
+      if (targetWs && targetWs.readyState === WebSocket.OPEN) {
+        // odmah šalje ako je online
+        targetWs.send(JSON.stringify({ ...data, type: "friendRequest" }));
+      } else {
+        // ako nije online → spremi u pending
+        if (!pendingRequests.has(data.to)) pendingRequests.set(data.to, []);
+        pendingRequests.get(data.to).push({
+          from: data.fromProfile
+        });
+}
+}
 
-            const payload = { type: "friendRequest", fromProfile: data.fromProfile };
-            if (targetWs && targetWs.readyState === WebSocket.OPEN) {
-                targetWs.send(JSON.stringify(payload));
-            } else {
-                if (!pendingRequests.has(data.to)) pendingRequests.set(data.to, []);
-                pendingRequests.get(data.to).push(payload);
-            }
-        }
+    // 🔹 SIGNAL (offer/answer/ice)
+    if (data.offer || data.answer || data.ice) {
+      broadcastExcept(ws, raw);
+    // ------------------- FRIEND ACCEPT -------------------
+    if (type === "friendAccept" || type === "friendReject") {
+      const targetWs = sockets.get(data.to);
+      if (targetWs && targetWs.readyState === WebSocket.OPEN) {
+        targetWs.send(JSON.stringify(data));
+      }
+}
+});
 
-        // FRIEND ACCEPT / REJECT
-        if (type === "friendAccept" || type === "friendReject") {
-            const targetWs = sockets.get(data.to); // originalni posiljalac
-            const responder = data.fromProfile;    // osoba koja odgovara
-
-            // Posalji pošiljaocu
-            if (targetWs && targetWs.readyState === WebSocket.OPEN) {
-                targetWs.send(JSON.stringify({
-                    type: type,
-                    fromProfile: responder
-                }));
-            } else {
-                if (!pendingRequests.has(data.to)) pendingRequests.set(data.to, []);
-                pendingRequests.get(data.to).push({
-                    type: type,
-                    fromProfile: responder
-                });
-            }
-
-            // Posalji onome ko odgovara
-            if (ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({
-                    type: type === "friendAccept" ? "friendAcceptedByYou" : "friendRejectedByYou",
-                    fromProfile: responder,
-                    toProfile: data.toProfile // dodano za alert
-                }));
-            }
-        }
-    });
-
-    ws.on("close", () => {
-        const profile = users.get(ws);
-        if (profile) {
-            users.delete(ws);
-            sockets.delete(profile.uuid);
-            broadcastOnlineUsers();
-        }
-        console.log("Client disconnected");
-    });
+ws.on("close", () => {
+    const user = clients.get(ws);
+    if (user) {
+      rooms.lobby.delete(user.uuid);
+      clients.delete(ws);
+      broadcastLobby();
+    const profile = users.get(ws);
+    if (profile) {
+      users.delete(ws);
+      sockets.delete(profile.uuid);
+      console.log("Client disconnected:", profile.name);
+      broadcastOnlineUsers();
+    }
+    console.log("Client disconnected");
+    }};
 });
 
 function broadcastLobby() {
