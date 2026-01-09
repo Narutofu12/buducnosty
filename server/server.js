@@ -56,49 +56,40 @@ wss.on("connection", ws => {
         }
 
         // FRIEND ACCEPT
-        
+
+        if (type === "friendAccept" || type === "friendReject") {
+        const from = profiles.get(data.fromProfile.uuid); // primalac (ko kliknuo accept/reject)
+        const to = profiles.get(data.to);                // pošiljalac zahtjeva
+        if (!from || !to) return;
+    
+        // ukloni iz pending
+        to.pending = to.pending.filter(u => u !== from.uuid);
+        from.pending = from.pending.filter(u => u !== to.uuid);
+    
         if (type === "friendAccept") {
-            const from = profiles.get(data.fromProfile.uuid); // primalac
-            const to = profiles.get(data.to);                // pošiljalac
-            if (!from || !to) return;
-        
-            if (!from.friends.includes(to.uuid)) from.friends.push(to.uuid);
+            // dodaj prijatelje
             if (!to.friends.includes(from.uuid)) to.friends.push(from.uuid);
-        
-            from.pending = from.pending.filter(u => u !== to.uuid);
-            to.pending = to.pending.filter(u => u !== from.uuid);
-        
-            const payload = {
-                type: "friendAccept",
-                fromProfile: from,
-                toProfile: to
-            };
-        
-            const wsFrom = sockets.get(from.uuid);
-            const wsTo = sockets.get(to.uuid);
-        
-            if (wsFrom && wsFrom.readyState === WebSocket.OPEN) wsFrom.send(JSON.stringify(payload));
-            if (wsTo && wsTo.readyState === WebSocket.OPEN) wsTo.send(JSON.stringify(payload));
-        
-            broadcastOnlineUsers();
+            if (!from.friends.includes(to.uuid)) from.friends.push(to.uuid);
         }
-
-
-
-        // FRIEND REJECT
-        if (type === "friendReject") {
-            const from = profiles.get(data.fromProfile.uuid);
-            const to = profiles.get(data.to);
-            if (!from || !to) return;
-
-            from.pending = from.pending.filter(u => u !== to.uuid);
-            to.pending = to.pending.filter(u => u !== from.uuid);
-
-            const targetWs = sockets.get(to.uuid);
-            if (targetWs && targetWs.readyState === WebSocket.OPEN) {
-                targetWs.send(JSON.stringify({ type: "friendReject", fromProfile: from }));
-            }
+    
+        // pošalji signal pošiljaocu
+        const wsTo = sockets.get(to.uuid);
+        if (wsTo && wsTo.readyState === WebSocket.OPEN) {
+            wsTo.send(JSON.stringify({
+                type: type === "friendAccept" ? "friendAccepted" : "friendRejected",
+                friend: { uuid: from.uuid, name: from.name, image: from.avatar || "" }
+            }));
         }
+    
+        // pošalji signal primalcu
+        const wsFrom = sockets.get(from.uuid);
+        if (wsFrom && wsFrom.readyState === WebSocket.OPEN) {
+            wsFrom.send(JSON.stringify({
+                type: type === "friendAccept" ? "friendAdded" : "friendRejectedLocal",
+                friend: { uuid: to.uuid, name: to.name, image: to.avatar || "" }
+            }));
+        }
+    }        
     });
 
     ws.on("close", () => {
@@ -123,5 +114,6 @@ function broadcastOnlineUsers() {
         if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "onlineUsers", users: onlineList }));
     });
 }
+
 
 
