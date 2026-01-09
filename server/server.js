@@ -4,8 +4,8 @@ const { randomUUID } = require("crypto");
 const port = process.env.PORT || 8080;
 const wss = new WebSocket.Server({ port });
 
-const sockets = new Map();      // uuid -> ws
-const profiles = new Map();     // uuid -> profile
+const sockets = new Map();    // uuid -> ws
+const profiles = new Map();   // uuid -> profile
 
 console.log("WS server running on port", port);
 
@@ -37,6 +37,7 @@ wss.on("connection", ws => {
             sockets.set(profile.uuid, ws);
             ws.send(JSON.stringify({ type: "loginSuccess", profile }));
             broadcastOnlineUsers();
+            return;
         }
 
         // FRIEND REQUEST
@@ -46,6 +47,7 @@ wss.on("connection", ws => {
             if (!from || !to) return;
 
             if (!to.pending.includes(from.uuid)) to.pending.push(from.uuid);
+
             const targetWs = sockets.get(to.uuid);
             if (targetWs && targetWs.readyState === WebSocket.OPEN) {
                 targetWs.send(JSON.stringify({
@@ -53,48 +55,50 @@ wss.on("connection", ws => {
                     fromProfile: from
                 }));
             }
+            return;
         }
 
-        // FRIEND ACCEPT
-
+        // FRIEND ACCEPT / REJECT
         if (type === "friendAccept" || type === "friendReject") {
-            const from = profiles.get(data.fromProfile.uuid); // primalac (ko kliknuo accept/reject)
-            const to = profiles.get(data.to);                // pošiljalac zahtjeva
+            const from = profiles.get(data.fromProfile.uuid); // primalac
+            const to = profiles.get(data.to);                // posiljalac
             if (!from || !to) return;
-    
+
             // ukloni iz pending
             from.pending = from.pending.filter(u => u !== to.uuid);
             to.pending = to.pending.filter(u => u !== from.uuid);
-                
-             // dodaj prijatelje
+
+            if (type === "friendAccept") {
                 // dodaj prijatelje (full profile)
-            if (!from.friends.some(f => f.uuid === to.uuid)) from.friends.push({ uuid: to.uuid, name: to.name, image: to.image });
-            if (!to.friends.some(f => f.uuid === from.uuid)) to.friends.push({ uuid: from.uuid, name: from.name, image: from.image });
-        
-    
+                if (!from.friends.some(f => f.uuid === to.uuid)) {
+                    from.friends.push({ uuid: to.uuid, name: to.name, image: to.image });
+                }
+                if (!to.friends.some(f => f.uuid === from.uuid)) {
+                    to.friends.push({ uuid: from.uuid, name: from.name, image: from.image });
+                }
+            }
+
+            // signal za pošiljaoca
             const wsTo = sockets.get(to.uuid);
             if (wsTo && wsTo.readyState === WebSocket.OPEN) {
                 wsTo.send(JSON.stringify({
-                    type: "friendAccepted",
+                    type: type === "friendAccept" ? "friendAccepted" : "friendRejected",
                     friend: { uuid: from.uuid, name: from.name, image: from.image || "images/avatar.png" }
                 }));
             }
-    
-            // pošalji signal primalcu (dodaj friend)
+
+            // signal za primalca (dodaj friend)
             const wsFrom = sockets.get(from.uuid);
             if (wsFrom && wsFrom.readyState === WebSocket.OPEN) {
                 wsFrom.send(JSON.stringify({
-                    type: "friendAdded",
+                    type: type === "friendAccept" ? "friendAdded" : "friendRejectedLocal",
                     friend: { uuid: to.uuid, name: to.name, image: to.image || "images/avatar.png" }
                 }));
             }
-    }
-    
-        
-    
-        
-    }        
-    });
+            return;
+        }
+
+    }); // kraj ws.on("message")
 
     ws.on("close", () => {
         const profileEntry = [...sockets.entries()].find(([uuid, sock]) => sock === ws);
@@ -107,20 +111,16 @@ wss.on("connection", ws => {
         console.log("Client disconnected");
         broadcastOnlineUsers();
     });
-});
+}); // kraj wss.on("connection")
 
 function broadcastOnlineUsers() {
     const onlineList = Array.from(profiles.values())
         .filter(p => p.online)
-        .map(p => ({ uuid: p.uuid, name: p.name, image: p.image || 'images/image.png', online: true }));
+        .map(p => ({ uuid: p.uuid, name: p.name, image: p.image || 'images/avatar.png', online: true }));
 
     sockets.forEach(ws => {
-        if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "onlineUsers", users: onlineList }));
+        if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: "onlineUsers", users: onlineList }));
+        }
     });
 }
-
-
-
-
-
-
