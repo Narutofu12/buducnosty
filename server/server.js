@@ -40,6 +40,20 @@ wss.on("connection", ws => {
             return;
         }
 
+        if (type === "chat") {
+            // pošalji svim online prijateljima
+            const fromProfile = profiles.get(data.from);
+            if (!fromProfile) return;
+        
+            fromProfile.friends.forEach(f => {
+                const wsFriend = sockets.get(f.uuid);
+                if (wsFriend && wsFriend.readyState === WebSocket.OPEN) {
+                    wsFriend.send(JSON.stringify(data));
+                }
+            });
+        }
+
+
         // FRIEND REQUEST
         if (type === "friendRequest") {
             const from = profiles.get(data.fromProfile.uuid);
@@ -124,3 +138,4 @@ function broadcastOnlineUsers() {
         }
     });
 }
+
