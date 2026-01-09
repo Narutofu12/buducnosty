@@ -56,30 +56,41 @@ wss.on("connection", ws => {
         }
 
         // FRIEND ACCEPT
+        // FRIEND ACCEPT
         if (type === "friendAccept") {
-            const from = profiles.get(data.fromProfile.uuid);
-            const to = profiles.get(data.to);
+            const from = profiles.get(data.fromProfile.uuid); // primaoc
+            const to = profiles.get(data.to);                // pošiljalac
             if (!from || !to) return;
-
+        
+            // dodaj prijatelje ako već nisu
             if (!from.friends.includes(to.uuid)) from.friends.push(to.uuid);
             if (!to.friends.includes(from.uuid)) to.friends.push(from.uuid);
-
+        
             // ukloni iz pending
             from.pending = from.pending.filter(u => u !== to.uuid);
             to.pending = to.pending.filter(u => u !== from.uuid);
-
-            // pošalji svima update
-            const targetWs = sockets.get(to.uuid);
-            if (targetWs && targetWs.readyState === WebSocket.OPEN) {
-                targetWs.send(JSON.stringify({ type: "friendAccept", fromProfile: from }));
+        
+            // pošalji signal pošiljaocu
+            const wsTo = sockets.get(to.uuid);
+            if (wsTo && wsTo.readyState === WebSocket.OPEN) {
+                wsTo.send(JSON.stringify({
+                    type: "friendAccepted",
+                    friend: { uuid: from.uuid, name: from.name, avatar: from.avatar }
+                }));
             }
-            const fromWs = sockets.get(from.uuid);
-            if (fromWs && fromWs.readyState === WebSocket.OPEN) {
-                fromWs.send(JSON.stringify({ type: "friendAccept", fromProfile: to }));
+        
+            // pošalji signal primaocu
+            const wsFrom = sockets.get(from.uuid);
+            if (wsFrom && wsFrom.readyState === WebSocket.OPEN) {
+                wsFrom.send(JSON.stringify({
+                    type: "friendAdded",
+                    friend: { uuid: to.uuid, name: to.name, avatar: to.avatar }
+                }));
             }
-
+        
             broadcastOnlineUsers();
         }
+
 
         // FRIEND REJECT
         if (type === "friendReject") {
@@ -119,3 +130,4 @@ function broadcastOnlineUsers() {
         if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "onlineUsers", users: onlineList }));
     });
 }
+
