@@ -44,13 +44,21 @@ wss.on("connection", ws => {
             // pošalji svim online prijateljima
             const fromProfile = profiles.get(data.from);
             if (!fromProfile) return;
-        
-            fromProfile.friends.forEach(f => {
-                const wsFriend = sockets.get(f.uuid);
-                if (wsFriend && wsFriend.readyState === WebSocket.OPEN) {
-                    wsFriend.send(JSON.stringify(data));
+
+            // Ako želiš da ide samo prijatelju
+            const toProfile = profiles.get(data.to); // u data.to treba biti uuid primatelja
+            if (toProfile) {
+                const targetWs = sockets.get(toProfile.uuid);
+                if (targetWs && targetWs.readyState === WebSocket.OPEN) {
+                    targetWs.send(JSON.stringify(data)); // šalje poruku primatelju
                 }
-            });
+            }
+        
+            // Opcionalno: dodaj poruku i sebi (ako hoćeš da se prikaže odmah)
+            const senderWs = sockets.get(data.from);
+            if (senderWs && senderWs.readyState === WebSocket.OPEN) {
+                senderWs.send(JSON.stringify(data));
+            }        
         }
 
 
@@ -138,4 +146,5 @@ function broadcastOnlineUsers() {
         }
     });
 }
+
 
