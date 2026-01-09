@@ -25,7 +25,7 @@ wss.on("connection", ws => {
                 profile = {
                     uuid: data.profile.uuid,
                     name: data.profile.name,
-                    image: data.profile.image || 'images/image.png',
+                    image: data.profile.image || 'images/avatar.png',
                     friends: [],
                     pending: [],
                     online: true
@@ -76,7 +76,7 @@ wss.on("connection", ws => {
             if (wsTo && wsTo.readyState === WebSocket.OPEN) {
                 wsTo.send(JSON.stringify({
                     type: "friendAccepted",
-                    friend: { uuid: from.uuid, name: from.name, image: from.image || "images/image.png" }
+                    friend: { uuid: from.uuid, name: from.name, image: from.image || "images/avatar.png" }
                 }));
             }
     
@@ -85,7 +85,7 @@ wss.on("connection", ws => {
             if (wsFrom && wsFrom.readyState === WebSocket.OPEN) {
                 wsFrom.send(JSON.stringify({
                     type: "friendAdded",
-                    friend: { uuid: to.uuid, name: to.name, image: to.image || "images/image.png" }
+                    friend: { uuid: to.uuid, name: to.name, image: to.image || "images/avatar.png" }
                 }));
             }
     }
@@ -118,6 +118,7 @@ function broadcastOnlineUsers() {
         if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "onlineUsers", users: onlineList }));
     });
 }
+
 
 
 
