@@ -1,11 +1,11 @@
 const WebSocket = require("ws");
-const { randomUUID } = require("crypto");
 
 const port = process.env.PORT || 8080;
 const wss = new WebSocket.Server({ port });
 
-const sockets = new Map();    // uuid -> ws
-const profiles = new Map();   // uuid -> profile
+const sockets = new Map();          // uuid -> ws
+const profiles = new Map();         // uuid -> profile
+const offlineMessages = new Map();  // uuid -> [messages]
 
 console.log("WS server running on port", port);
 
@@ -18,14 +18,15 @@ wss.on("connection", ws => {
 
         const type = data.type;
 
-        // REGISTER / LOGIN
+        /* ================= LOGIN / REGISTER ================= */
         if (type === "register" || type === "login") {
             let profile = profiles.get(data.profile.uuid);
+
             if (!profile) {
                 profile = {
                     uuid: data.profile.uuid,
                     name: data.profile.name,
-                    image: data.profile.image || 'images/avatar.png',
+                    image: data.profile.image || "images/avatar.png",
                     friends: [],
                     pending: [],
                     online: true
@@ -34,41 +35,71 @@ wss.on("connection", ws => {
             } else {
                 profile.online = true;
             }
+
             sockets.set(profile.uuid, ws);
-            ws.send(JSON.stringify({ type: "loginSuccess", profile }));
+
+            ws.send(JSON.stringify({
+                type: "loginSuccess",
+                profile
+            }));
+
+            // 🔥 pošalji offline poruke ako postoje
+            if (offlineMessages.has(profile.uuid)) {
+                ws.send(JSON.stringify({
+                    type: "offlineMessages",
+                    messages: offlineMessages.get(profile.uuid)
+                }));
+                offlineMessages.delete(profile.uuid);
+            }
+
             broadcastOnlineUsers();
             return;
         }
 
+        /* ================= CHAT ================= */
         if (type === "chat") {
-            // pošalji svim online prijateljima
             const fromProfile = profiles.get(data.from);
-            if (!fromProfile) return;
+            const toProfile = profiles.get(data.to);
+            if (!fromProfile || !toProfile) return;
 
-            // Ako želiš da ide samo prijatelju
-            const toProfile = profiles.get(data.to); // u data.to treba biti uuid primatelja
-            if (toProfile) {
-                const targetWs = sockets.get(toProfile.uuid);
-                if (targetWs && targetWs.readyState === WebSocket.OPEN) {
-                    targetWs.send(JSON.stringify(data)); // šalje poruku primatelju
+            const message = {
+                type: "chat",
+                from: data.from,
+                to: data.to,
+                text: data.text,
+                time: Date.now()
+            };
+
+            // ➜ pošalji primatelju ako je online
+            const targetWs = sockets.get(toProfile.uuid);
+            if (targetWs && targetWs.readyState === WebSocket.OPEN) {
+                targetWs.send(JSON.stringify(message));
+            } else {
+                // 📴 spremi offline poruku
+                if (!offlineMessages.has(toProfile.uuid)) {
+                    offlineMessages.set(toProfile.uuid, []);
                 }
+                offlineMessages.get(toProfile.uuid).push(message);
             }
-        
-            // Opcionalno: dodaj poruku i sebi (ako hoćeš da se prikaže odmah)
-            const senderWs = sockets.get(data.from);
+
+            // ➜ pošalji i pošiljaocu (instant prikaz)
+            const senderWs = sockets.get(fromProfile.uuid);
             if (senderWs && senderWs.readyState === WebSocket.OPEN) {
-                senderWs.send(JSON.stringify(data));
-            }        
+                senderWs.send(JSON.stringify(message));
+            }
+
+            return;
         }
 
-
-        // FRIEND REQUEST
+        /* ================= FRIEND REQUEST ================= */
         if (type === "friendRequest") {
             const from = profiles.get(data.fromProfile.uuid);
             const to = profiles.get(data.to);
             if (!from || !to) return;
 
-            if (!to.pending.includes(from.uuid)) to.pending.push(from.uuid);
+            if (!to.pending.includes(from.uuid)) {
+                to.pending.push(from.uuid);
+            }
 
             const targetWs = sockets.get(to.uuid);
             if (targetWs && targetWs.readyState === WebSocket.OPEN) {
@@ -80,18 +111,16 @@ wss.on("connection", ws => {
             return;
         }
 
-        // FRIEND ACCEPT / REJECT
+        /* ================= FRIEND ACCEPT / REJECT ================= */
         if (type === "friendAccept" || type === "friendReject") {
-            const from = profiles.get(data.fromProfile.uuid); // primalac
-            const to = profiles.get(data.to);                // posiljalac
+            const from = profiles.get(data.fromProfile.uuid);
+            const to = profiles.get(data.to);
             if (!from || !to) return;
 
-            // ukloni iz pending
             from.pending = from.pending.filter(u => u !== to.uuid);
             to.pending = to.pending.filter(u => u !== from.uuid);
 
             if (type === "friendAccept") {
-                // dodaj prijatelje (full profile)
                 if (!from.friends.some(f => f.uuid === to.uuid)) {
                     from.friends.push({ uuid: to.uuid, name: to.name, image: to.image });
                 }
@@ -100,51 +129,55 @@ wss.on("connection", ws => {
                 }
             }
 
-            // signal za pošiljaoca
             const wsTo = sockets.get(to.uuid);
             if (wsTo && wsTo.readyState === WebSocket.OPEN) {
                 wsTo.send(JSON.stringify({
                     type: type === "friendAccept" ? "friendAccepted" : "friendRejected",
-                    friend: { uuid: from.uuid, name: from.name, image: from.image || "images/avatar.png" }
+                    friend: { uuid: from.uuid, name: from.name, image: from.image }
                 }));
             }
 
-            // signal za primalca (dodaj friend)
             const wsFrom = sockets.get(from.uuid);
             if (wsFrom && wsFrom.readyState === WebSocket.OPEN) {
                 wsFrom.send(JSON.stringify({
                     type: type === "friendAccept" ? "friendAdded" : "friendRejectedLocal",
-                    friend: { uuid: to.uuid, name: to.name, image: to.image || "images/avatar.png" }
+                    friend: { uuid: to.uuid, name: to.name, image: to.image }
                 }));
             }
             return;
         }
-
-    }); // kraj ws.on("message")
+    });
 
     ws.on("close", () => {
-        const profileEntry = [...sockets.entries()].find(([uuid, sock]) => sock === ws);
-        if (profileEntry) {
-            const [uuid] = profileEntry;
+        const entry = [...sockets.entries()].find(([_, sock]) => sock === ws);
+        if (entry) {
+            const [uuid] = entry;
             const profile = profiles.get(uuid);
             if (profile) profile.online = false;
             sockets.delete(uuid);
         }
-        console.log("Client disconnected");
         broadcastOnlineUsers();
+        console.log("Client disconnected");
     });
-}); // kraj wss.on("connection")
+});
 
+/* ================= ONLINE USERS ================= */
 function broadcastOnlineUsers() {
     const onlineList = Array.from(profiles.values())
         .filter(p => p.online)
-        .map(p => ({ uuid: p.uuid, name: p.name, image: p.image || 'images/avatar.png', online: true }));
+        .map(p => ({
+            uuid: p.uuid,
+            name: p.name,
+            image: p.image || "images/avatar.png",
+            online: true
+        }));
 
     sockets.forEach(ws => {
         if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: "onlineUsers", users: onlineList }));
+            ws.send(JSON.stringify({
+                type: "onlineUsers",
+                users: onlineList
+            }));
         }
     });
 }
-
-
