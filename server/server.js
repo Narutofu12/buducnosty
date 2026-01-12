@@ -56,6 +56,24 @@ wss.on("connection", ws => {
             return;
         }
 
+        if (type === "sync") {
+          const msgs = messages.filter(m =>
+            m.to === data.uuid && m.time > data.lastSync
+          );
+        
+          const pending = pendingRequests.get(data.uuid) || [];
+        
+          ws.send(JSON.stringify({
+            type: "syncData",
+            messages: msgs,
+            friendRequests: pending,
+            serverTime: Date.now()
+          }));
+        
+          pendingRequests.delete(data.uuid);
+        }
+
+
         /* ================= CHAT ================= */
         if (type === "chat") {
             const fromProfile = profiles.get(data.from);
@@ -181,3 +199,4 @@ function broadcastOnlineUsers() {
         }
     });
 }
+
