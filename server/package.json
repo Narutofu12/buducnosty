@@ -12,6 +12,8 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
-    "ws": "^8.18.3"
+    "ws": "^8.18.3",
+    "web-push": "^3.4.5",
+    "dotenv": "^16.0.0"
   }
 }
