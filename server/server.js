@@ -142,16 +142,20 @@ ws.on("connection", ws => {
         if (!offlineMessages.has(to.uuid)) offlineMessages.set(to.uuid, []);
         offlineMessages.get(to.uuid).push(message);
 
-        // 🔔 pošalji push notifikaciju
+        // 🔔 pošalji push notifikaciju        
         const sub = subscriptions.get(to.uuid);
         if (sub && sub.endpoint) {
           webpush.sendNotification(
             sub,
-            JSON.stringify({ title: `Nova poruka od ${from.name}`, body: data.text })
+            JSON.stringify({ 
+              title: `${from.name}`,
+              body: data.text,
+              from: `chat-${from.uuid}`
+             })
           ).catch(err => console.log("Push error:", err));
         }
       }
-
+      
       // pošalji i pošiljaocu
       const senderWs = sockets.get(from.uuid);
       if (senderWs && senderWs.readyState === WebSocket.OPEN) {
@@ -251,3 +255,4 @@ function saveSubscriptions() {
     if (err) console.error("Greška pri spremanju subscriptions:", err);
   });
 }
+
