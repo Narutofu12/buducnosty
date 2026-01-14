@@ -3,12 +3,25 @@ require("dotenv").config();
 const webpush = require("web-push");
 
 const PORT = process.env.PORT || 8080;
-const wss = new WebSocket.Server({ port: PORT });
+const ws = new WebSocket.Server({ port: PORT });
 
 const sockets = new Map();          // uuid -> ws
 const profiles = new Map();         // uuid -> profile
 const offlineMessages = new Map();  // uuid -> [messages]
-const subscriptions = new Map();    // uuid -> push subscription
+
+const fs = require("fs");
+const path = require("path");
+
+const subscriptionsFile = path.join(__dirname, "subscriptions.json");
+let subscriptions = new Map();
+
+// Učitaj postojeće subscriptions sa fajla na startu servera
+if (fs.existsSync(subscriptionsFile)) {
+  const raw = fs.readFileSync(subscriptionsFile);
+  const obj = JSON.parse(raw);
+  Object.keys(obj).forEach(uuid => subscriptions.set(uuid, obj[uuid]));
+}
+
 
 console.log("WS server running on port", PORT);
 
@@ -37,7 +50,7 @@ setInterval(() => {
 }, 15000);
 
 /* ===== CONNECTION ===== */
-wss.on("connection", ws => {
+ws.on("connection", ws => {
   ws.isAlive = true;
   ws.on("pong", heartbeat);
 
@@ -131,7 +144,7 @@ wss.on("connection", ws => {
 
         // 🔔 pošalji push notifikaciju
         const sub = subscriptions.get(to.uuid);
-        if (sub) {
+        if (sub && sub.endpoint) {
           webpush.sendNotification(
             sub,
             JSON.stringify({ title: `Nova poruka od ${from.name}`, body: data.text })
@@ -201,7 +214,9 @@ wss.on("connection", ws => {
 
     /* ===== PUSH SUBSCRIPTION ===== */
     if (type === "pushSubscribe") {
+      if (!currentUuid) return; // ne može se pohraniti ako nije login
       subscriptions.set(currentUuid, data.subscription);
+      saveSubscriptions();  // trajno pohranjeno
       return;
     }
   });
@@ -227,5 +242,12 @@ function broadcastOnlineUsers() {
     if (ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ type: "onlineUsers", users: onlineList }));
     }
+  });
+}
+
+function saveSubscriptions() {
+  const obj = Object.fromEntries(subscriptions);
+  fs.writeFile(subscriptionsFile, JSON.stringify(obj, null, 2), err => {
+    if (err) console.error("Greška pri spremanju subscriptions:", err);
   });
 }
