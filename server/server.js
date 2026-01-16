@@ -149,8 +149,7 @@ ws.on("connection", ws => {
             sub,
             JSON.stringify({ 
               title: `${from.name}`,
-              body: data.text,
-              from: `chat-${from.uuid}`
+              body: data.text              
              })
           ).catch(err => console.log("Push error:", err));
         }
@@ -255,4 +254,5 @@ function saveSubscriptions() {
     if (err) console.error("Greška pri spremanju subscriptions:", err);
   });
 }
+
 
