@@ -142,19 +142,19 @@ ws.on("connection", ws => {
         if (!offlineMessages.has(to.uuid)) offlineMessages.set(to.uuid, []);
         offlineMessages.get(to.uuid).push(message);
 
-        // 🔔 pošalji push notifikaciju        
+        // 🔔 pošalji push notifikaciju
         const sub = subscriptions.get(to.uuid);
         if (sub && sub.endpoint) {
           webpush.sendNotification(
             sub,
             JSON.stringify({ 
               title: `${from.name}`,
-              body: data.text              
+              body: data.text
              })
           ).catch(err => console.log("Push error:", err));
         }
       }
-      
+
       // pošalji i pošiljaocu
       const senderWs = sockets.get(from.uuid);
       if (senderWs && senderWs.readyState === WebSocket.OPEN) {
@@ -225,7 +225,9 @@ ws.on("connection", ws => {
   });
 
   ws.on("close", () => {
+    const entry = [...sockets.entries()].find(([_, sock]) => sock === ws);
     if (currentUuid) {
+      const [uuid] = entry;
       const profile = profiles.get(currentUuid);
       if (profile) profile.online = false;
       sockets.delete(currentUuid);
@@ -239,11 +241,19 @@ ws.on("connection", ws => {
 function broadcastOnlineUsers() {
   const onlineList = Array.from(profiles.values())
     .filter(p => p.online)
-    .map(p => ({ uuid: p.uuid, name: p.name, image: p.image || "images/avatar.png", online: true }));
+    .map(p => ({
+      uuid: p.uuid,
+      name: p.name,
+      image: p.image || "images/avatar.png",
+      online: true 
+    }));
 
   sockets.forEach(ws => {
     if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: "onlineUsers", users: onlineList }));
+      ws.send(JSON.stringify({
+        type: "onlineUsers",
+        users: onlineList
+      }));
     }
   });
 }
@@ -254,5 +264,3 @@ function saveSubscriptions() {
     if (err) console.error("Greška pri spremanju subscriptions:", err);
   });
 }
-
-
