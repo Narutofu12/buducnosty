@@ -226,8 +226,13 @@ ws.on("connection", ws => {
 
   ws.on("close", () => {
     const entry = [...sockets.entries()].find(([_, sock]) => sock === ws);
-    if (currentUuid) {
+    if (entry) {
       const [uuid] = entry;
+      const profile = profiles.get(uuid);
+      if (profile) profile.online = false;
+      sockets.delete(uuid);
+    }else if (currentUuid) {
+      // fallback ako entry nije pronađen
       const profile = profiles.get(currentUuid);
       if (profile) profile.online = false;
       sockets.delete(currentUuid);
@@ -264,3 +269,4 @@ function saveSubscriptions() {
     if (err) console.error("Greška pri spremanju subscriptions:", err);
   });
 }
+
