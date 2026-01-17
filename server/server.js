@@ -1,90 +1,95 @@
+// server.js
 const WebSocket = require("ws");
 require("dotenv").config();
 const webpush = require("web-push");
+const mongoose = require("mongoose");
 
+// ==== MODELS ====
+const Profile = require("./models/Profile");
+const PendingMessage = require("./models/Message");
+const Subscription = require("./models/Subscription");
+
+// ==== MONGO ====
+mongoose.connect(process.env.MONGO_URI, {
+  useNewUrlParser: true,
+  useUnifiedTopology: true
+})
+.then(() => console.log("MongoDB connected"))
+.catch(err => console.error("Mongo error:", err));
+
+// ==== WS SERVER ====
 const PORT = process.env.PORT || 8080;
-const ws = new WebSocket.Server({ port: PORT });
-
-const sockets = new Map();          // uuid -> ws
-const profiles = new Map();         // uuid -> profile
-const offlineMessages = new Map();  // uuid -> [messages]
-
-const fs = require("fs");
-const path = require("path");
-
-const subscriptionsFile = path.join(__dirname, "subscriptions.json");
-let subscriptions = new Map();
-
-// Učitaj postojeće subscriptions sa fajla na startu servera
-if (fs.existsSync(subscriptionsFile)) {
-  const raw = fs.readFileSync(subscriptionsFile);
-  const obj = JSON.parse(raw);
-  Object.keys(obj).forEach(uuid => subscriptions.set(uuid, obj[uuid]));
-}
-
+const wsServer = new WebSocket.Server({ port: PORT });
+const sockets = new Map(); // uuid -> ws
 
 console.log("WS server running on port", PORT);
 
-// Setup VAPID
+// ==== VAPID ====
 webpush.setVapidDetails(
   "mailto:admin@scchat.app",
   process.env.VAPID_PUBLIC_KEY,
   process.env.VAPID_PRIVATE_KEY
 );
 
-/* ===== HEARTBEAT (PING/PONG) ===== */
+// ==== HEARTBEAT ====
 function heartbeat() { this.isAlive = true; }
 
-setInterval(() => {
-  sockets.forEach((ws, uuid) => {
+setInterval(async () => {
+  for (const [uuid, ws] of sockets) {
     if (!ws.isAlive) {
-      const profile = profiles.get(uuid);
-      if (profile) profile.online = false;
+      // set offline in DB
+      const profile = await Profile.findOne({ uuid });
+      if (profile) {
+        profile.online = false;
+        await profile.save();
+      }
       sockets.delete(uuid);
       broadcastOnlineUsers();
-      return ws.terminate();
+      ws.terminate();
+    } else {
+      ws.isAlive = false;
+      ws.ping();
     }
-    ws.isAlive = false;
-    ws.ping();
-  });
+  }
 }, 15000);
 
-/* ===== CONNECTION ===== */
-ws.on("connection", ws => {
+// ==== CONNECTION ====
+wsServer.on("connection", ws => {
   ws.isAlive = true;
   ws.on("pong", heartbeat);
+  let currentUuid = null;
 
-  let currentUuid = null; // track who this ws belongs to
-
-  ws.on("message", raw => {
+  ws.on("message", async raw => {
     let data;
     try { data = JSON.parse(raw); } catch { return; }
     const type = data.type;
 
     /* ===== REGISTER / LOGIN ===== */
     if (type === "register" || type === "login") {
-      let profile = profiles.get(data.profile.uuid);
+      let profile = await Profile.findOne({ uuid: data.profile.uuid });
       if (!profile) {
-        profile = {
+        profile = new Profile({
           uuid: data.profile.uuid,
           name: data.profile.name,
           image: data.profile.image || "images/avatar.png",
           friends: [],
           pending: [],
           online: true
-        };
-        profiles.set(profile.uuid, profile);
+        });
+        await profile.save();
       } else {
         profile.online = true;
+        await profile.save();
       }
 
       sockets.set(profile.uuid, ws);
       currentUuid = profile.uuid;
 
+      // Pošalji login success
       ws.send(JSON.stringify({ type: "loginSuccess", profile }));
 
-      // 🔥 Pošalji offline poruke + pending friend requestove
-      const messages = offlineMessages.get(profile.uuid) || [];
+      // Pošalji offline poruke + pending friend requests
+      const messages = await PendingMessage.find({ to: profile.uuid, delivered: false });
       const pendingRequests = profile.pending || [];
       ws.send(JSON.stringify({
         type: "syncData",
@@ -93,19 +98,21 @@ ws.on("connection", ws => {
         serverTime: Date.now()
       }));
 
-      offlineMessages.delete(profile.uuid);
+      // označi poruke kao isporučene
+      await PendingMessage.updateMany({ to: profile.uuid }, { delivered: true });
       profile.pending = [];
+      await profile.save();
 
       broadcastOnlineUsers();
       return;
     }
 
-    /* ===== SYNC REQUEST (manualni) ===== */
+    /* ===== SYNC REQUEST ===== */
     if (type === "sync") {
-      const profile = profiles.get(data.uuid);
+      const profile = await Profile.findOne({ uuid: data.uuid });
       if (!profile) return;
 
-      const messages = offlineMessages.get(profile.uuid) || [];
+      const messages = await PendingMessage.find({ to: profile.uuid, delivered: false });
       const pendingRequests = profile.pending || [];
       ws.send(JSON.stringify({
         type: "syncData",
@@ -114,63 +121,65 @@ ws.on("connection", ws => {
         serverTime: Date.now()
       }));
 
-      offlineMessages.set(profile.uuid, []);
+      await PendingMessage.updateMany({ to: profile.uuid }, { delivered: true });
       profile.pending = [];
+      await profile.save();
       return;
     }
 
     /* ===== CHAT ===== */
     if (type === "chat") {
-      const from = profiles.get(data.from);
-      const to = profiles.get(data.to);
+      const from = await Profile.findOne({ uuid: data.from });
+      const to = await Profile.findOne({ uuid: data.to });
       if (!from || !to) return;
 
-      const message = {
-        type: "chat",
+      const messageData = {
         from: from.uuid,
         to: to.uuid,
         text: data.text,
-        time: Date.now()
+        time: Date.now(),
+        delivered: false
       };
 
       // pošalji primatelju ako je online
       const targetWs = sockets.get(to.uuid);
       if (targetWs && targetWs.readyState === WebSocket.OPEN) {
-        targetWs.send(JSON.stringify(message));
-      } else {
-        // 📴 spremi offline poruku
-        if (!offlineMessages.has(to.uuid)) offlineMessages.set(to.uuid, []);
-        offlineMessages.get(to.uuid).push(message);
+        targetWs.send(JSON.stringify({ type: "chat", ...messageData }));
+        messageData.delivered = true;
+      } 
 
-        // 🔔 pošalji push notifikaciju
-        const sub = subscriptions.get(to.uuid);
-        if (sub && sub.endpoint) {
-          webpush.sendNotification(
-            sub,
-            JSON.stringify({ 
-              title: `${from.name}`,
-              body: data.text
-             })
-          ).catch(err => console.log("Push error:", err));
+      // spremi u DB
+      const msg = new PendingMessage(messageData);
+      await msg.save();
+
+      // push notification ako offline
+      if (!messageData.delivered) {
+        const subDoc = await Subscription.findOne({ uuid: to.uuid });
+        if (subDoc) {
+          webpush.sendNotification(subDoc.subscription, JSON.stringify({
+            title: `${from.name}`,
+            body: data.text
+          })).catch(err => console.log("Push error:", err));
         }
       }
 
       // pošalji i pošiljaocu
-      const senderWs = sockets.get(from.uuid);
-      if (senderWs && senderWs.readyState === WebSocket.OPEN) {
-        senderWs.send(JSON.stringify(message));
+      if (sockets.get(from.uuid) && sockets.get(from.uuid).readyState === WebSocket.OPEN) {
+        sockets.get(from.uuid).send(JSON.stringify({ type: "chat", ...messageData }));
       }
-
       return;
     }
 
     /* ===== FRIEND REQUEST ===== */
     if (type === "friendRequest") {
-      const from = profiles.get(data.fromProfile.uuid);
-      const to = profiles.get(data.to);
+      const from = await Profile.findOne({ uuid: data.fromProfile.uuid });
+      const to = await Profile.findOne({ uuid: data.to });
       if (!from || !to) return;
 
-      if (!to.pending.includes(from.uuid)) to.pending.push(from.uuid);
+      if (!to.pending.includes(from.uuid)) {
+        to.pending.push(from.uuid);
+        await to.save();
+      }
 
       const targetWs = sockets.get(to.uuid);
       if (targetWs && targetWs.readyState === WebSocket.OPEN) {
@@ -181,8 +190,8 @@ ws.on("connection", ws => {
 
     /* ===== FRIEND ACCEPT / REJECT ===== */
     if (type === "friendAccept" || type === "friendReject") {
-      const from = profiles.get(data.fromProfile.uuid);
-      const to = profiles.get(data.to);
+      const from = await Profile.findOne({ uuid: data.fromProfile.uuid });
+      const to = await Profile.findOne({ uuid: data.to });
       if (!from || !to) return;
 
       from.pending = from.pending.filter(u => u !== to.uuid);
@@ -196,6 +205,9 @@ ws.on("connection", ws => {
           to.friends.push({ uuid: from.uuid, name: from.name, image: from.image });
         }
       }
+
+      await from.save();
+      await to.save();
 
       const wsTo = sockets.get(to.uuid);
       if (wsTo && wsTo.readyState === WebSocket.OPEN) {
@@ -217,24 +229,23 @@ ws.on("connection", ws => {
 
     /* ===== PUSH SUBSCRIPTION ===== */
     if (type === "pushSubscribe") {
-      if (!currentUuid) return; // ne može se pohraniti ako nije login
-      subscriptions.set(currentUuid, data.subscription);
-      saveSubscriptions();  // trajno pohranjeno
+      if (!currentUuid) return;
+      await Subscription.findOneAndUpdate(
+        { uuid: currentUuid },
+        { subscription: data.subscription },
+        { upsert: true, new: true }
+      );
       return;
     }
   });
 
-  ws.on("close", () => {
-    const entry = [...sockets.entries()].find(([_, sock]) => sock === ws);
-    if (entry) {
-      const [uuid] = entry;
-      const profile = profiles.get(uuid);
-      if (profile) profile.online = false;
-      sockets.delete(uuid);
-    }else if (currentUuid) {
-      // fallback ako entry nije pronađen
-      const profile = profiles.get(currentUuid);
-      if (profile) profile.online = false;
+  ws.on("close", async () => {
+    if (currentUuid) {      
+      const profile = await Profile.findOne({ uuid: currentUuid });
+      if (profile) {
+        profile.online = false;
+        await profile.save();
+      }
       sockets.delete(currentUuid);
     }
     broadcastOnlineUsers();
@@ -242,31 +253,19 @@ ws.on("connection", ws => {
   });
 });
 
-/* ===== ONLINE USERS ===== */
-function broadcastOnlineUsers() {
-  const onlineList = Array.from(profiles.values())
-    .filter(p => p.online)
-    .map(p => ({
-      uuid: p.uuid,
-      name: p.name,
-      image: p.image || "images/avatar.png",
-      online: true 
-    }));
+// ==== ONLINE USERS BROADCAST ====
+async function broadcastOnlineUsers() {
+  const onlineProfiles = await Profile.find({ online: true });
+  const onlineList = onlineProfiles.map(p => ({
+    uuid: p.uuid,
+    name: p.name,
+    image: p.image || "images/avatar.png",
+    online: true
+  }));
 
-  sockets.forEach(ws => {
+  for (const ws of sockets.values()) {
     if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({
-        type: "onlineUsers",
-        users: onlineList
-      }));
+      ws.send(JSON.stringify({ type: "onlineUsers", users: onlineList }));
     }
-  });
+  }
 }
-
-function saveSubscriptions() {
-  const obj = Object.fromEntries(subscriptions);
-  fs.writeFile(subscriptionsFile, JSON.stringify(obj, null, 2), err => {
-    if (err) console.error("Greška pri spremanju subscriptions:", err);
-  });
-}
-
