@@ -13,8 +13,8 @@
   "type": "commonjs",
   "dependencies": {
     "dotenv": "^16.0.0",
-    "mongoose": "^7.3.0",
-    "web-push": "^4.1.4",
+    "mongoose": "^7.3.0",    
+    "web-push": "^3.4.5",
     "ws": "^8.18.3"
   }
 }
